@@ -747,7 +747,7 @@ foreach ($Item in $Report) {
             }
             # For reverse mapping, use AP name only (not policy-specific)
             if ($Hashmap.ContainsKey($x)) {
-                if ($Hashmap[$x] -notlike "*$APName*") {
+                if ($Hashmap[$x] -notcontains $APName -and $Hashmap[$x] -notmatch [regex]::Escape($APName)) {
                     $Hashmap[$x] += "| $APName"
                 }
             } else {
