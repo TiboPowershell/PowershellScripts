@@ -724,8 +724,7 @@ $ReportPrimaryApprovers = @()
 
 foreach ($Item in $Report) {
     $APName = $Item."AP Name"
-    $PolicyName = $Item."Assignment Policy Name"
-    $APWithPolicy = "$APName [$PolicyName]"
+    $PolicyName = $Item."Policy Display Name"
     $ResourceRoles = $Item."Resource Roles"
     $PrimApprovers = $Item."Primary Approvers"
     $Requesters = $Item."Allowed Requesters"
@@ -876,7 +875,7 @@ foreach ($R in $Report) {
         
         $ReportSummary.Add([PSCustomObject][Ordered]@{
             "Access Package" = $R.'AP Name'
-            "Policy Name" = $R.'Assignment Policy Name'
+            "Policy Name" = $R.'Policy Display Name'
             "Access Package Description" = $R.'AP Description'
             "User/Group" = $ActorName
             "Allowed Requester" = if ($Roles.ContainsKey("Allowed Requester")) { "X" } else { "" }
