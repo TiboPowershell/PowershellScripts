@@ -43,10 +43,10 @@
     When $True, provides detailed logging information. Default: $False
 
 .EXAMPLE
-    .\generate-access-package-report-local-v2.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint"
+    .\FullAccessPackageReport.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint"
 
 .EXAMPLE
-    .\generate-access-package-report-local-v2.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint" -OutputPath "C:\Reports" -VerboseOutput $True
+    .\FullAccessPackageReport.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint" -OutputPath "C:\Reports" -VerboseOutput $True
 
 .NOTES
     Required Permissions:
