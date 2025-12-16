@@ -9,14 +9,14 @@
     2. Analyze Access Package configurations including:
        - Resource roles and assignments
        - Approval workflows and approvers (primary, fallback, alternate across multiple stages)
-       - Assignment policies and requestor settings
+       - Assignment policies and requestor settings (ALL POLICIES per Access Package)
        - Access review configurations and reviewers
        - Expiration settings and extension policies
        - Custom extensions and requestor questions
     
     3. Generate an Excel report with multiple worksheets:
        - Role Dependencies (authorization matrix)
-       - AP Definitions (master list)
+       - AP Definitions (master list with ONE ROW PER POLICY)
        - Resource Roles breakdown
        - Reverse mapping (Role -> Access Packages)
        - Primary Approvers
@@ -24,6 +24,7 @@
        - Reviewers
        - Custom Extensions
        - Requestor Questions
+       - Assignments
        - Summary Statistics
 
 .PARAMETER TenantId
@@ -42,10 +43,10 @@
     When $True, provides detailed logging information. Default: $False
 
 .EXAMPLE
-    .\generate-access-package-report-local.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint"
+    .\generate-access-package-report-local-v2.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint"
 
 .EXAMPLE
-    .\generate-access-package-report-local.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint" -OutputPath "C:\Reports" -VerboseOutput $True
+    .\generate-access-package-report-local-v2.ps1 -TenantId "your-tenant-id" -ClientId "your-client-id" -Thumbprint "your-thumbprint" -OutputPath "C:\Reports" -VerboseOutput $True
 
 .NOTES
     Required Permissions:
@@ -67,6 +68,11 @@
         Install-Module Microsoft.Graph.Groups -Scope CurrentUser
         Install-Module Microsoft.Graph.Beta.Identity.Governance -Scope CurrentUser
         Install-Module ImportExcel -Scope CurrentUser
+    
+    CHANGES IN V2:
+    - Now processes ALL policies per Access Package (not just the first one)
+    - Creates separate report rows for each policy
+    - Better visibility into multi-policy configurations
 #>
 
 Param(
@@ -325,7 +331,8 @@ $ProgressPreference = "SilentlyContinue"
 
 Write-Host ""
 Write-Host "=============================================" -ForegroundColor White
-Write-Host "   Access Package Report Generator (Local)    " -ForegroundColor White
+Write-Host "   Access Package Report Generator v2        " -ForegroundColor White
+Write-Host "   (Multi-Policy Support)                    " -ForegroundColor White
 Write-Host "=============================================" -ForegroundColor White
 Write-Host ""
 
@@ -402,6 +409,7 @@ $CountTotal = $AccessPackageList.Count
 $CurrentIndex = 0
 $StartTime = Get-Date
 $TotalAssignmentsFound = 0
+$TotalPoliciesProcessed = 0
 
 Write-Log -Message "Processing Access Packages..."
 Write-Host ""
@@ -446,7 +454,7 @@ foreach ($AccessPackage in $AccessPackageList) {
     # Get resource roles from catalog mapping (works for all packages, regardless of assignments)
     $GroupsString = $resourcesEmptyAccessPackagesAssignments[$AccessPackageName] -join " | "
     
-    # Get ALL assignments for the assignments report
+    # Get ALL assignments for the assignments report (ONCE per Access Package)
     $AllAssignments = Get-MgBetaEntitlementManagementAccessPackageAssignment `
         -AccessPackageId $AccessPackageID `
         -ExpandProperty target -All
@@ -473,109 +481,16 @@ foreach ($AccessPackage in $AccessPackageList) {
         }
     }
 
-    # Get Assignment Policies
+    # Get ALL Assignment Policies for this Access Package
     [Array]$AccessPackageAssignmentPolicies = $EntitlementManagementAccessPackageList | 
         Where-Object { $_.Id -eq $AccessPackageID } | 
         Select-Object -ExpandProperty AccessPackageAssignmentPolicies
     
-    $AssignmentPolicyDisplayName = $AccessPackageAssignmentPolicies[0].DisplayName
+    Write-Log -Message "  Found $($AccessPackageAssignmentPolicies.Count) policies for this Access Package" -Level Verbose -Indent 2
     
-    # Get approval settings
-    $ApprovalMode = $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalMode
-    
-    # Allowed requestors
-    $AllowedRequestors = $Null
-    $AccessPackageAssignmentPolicies[0].RequestorSettings.AllowedRequestors | ForEach-Object {
-        $Req = $_.AdditionalProperties.description
-        $AllowedRequestors += "$Req |"
-    }
-
-    # Get approvers for all stages
-    $PrimaryApproversStage1 = $Null
-    $FallbackApproversStage1 = $Null
-    $PrimaryApproversStage2 = $Null
-    $FallbackApproversStage2 = $Null
-    $PrimaryApproversStage3 = $Null
-    $FallbackApproversStage3 = $Null
-
-    if ($ApprovalMode -ne "NoApproval") {
-        $counter = ($AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages).Count
-        for ($x = 0; $x -lt $counter; $x++) {
-            $Stage = $x + 1
-            $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[$x].PrimaryApprovers | ForEach-Object {
-                $Approver = Get-ApproverDescription -Data $_
-                $IsBackup = $_.IsBackup
-                switch ($Stage) {
-                    1 { if ($IsBackup) { $FallbackApproversStage1 += "$Approver | " } else { $PrimaryApproversStage1 += "$Approver | " } }
-                    2 { if ($IsBackup) { $FallbackApproversStage2 += "$Approver | " } else { $PrimaryApproversStage2 += "$Approver | " } }
-                    3 { if ($IsBackup) { $FallbackApproversStage3 += "$Approver | " } else { $PrimaryApproversStage3 += "$Approver | " } }
-                }
-            }
-        }
-    }
-    
-    # Get review settings
-    $ReviewRecurrence = $AccessPackageAssignmentPolicies[0].AccessReviewSettings.RecurrenceType
-    
-    $Reviewers = $Null
-    if ($AccessPackageAssignmentPolicies[0].AccessReviewSettings.ReviewerType -eq 'Manager') {
-        $Reviewers = "Manager"
-    } else {
-        $Reviewers = (($AccessPackageAssignmentPolicies[0].AccessReviewSettings.Reviewers | ForEach-Object { $_.AdditionalProperties.description }) -join " | ")
-    }
-    
-    # Request settings
-    $EnableNewRequests = $AccessPackageAssignmentPolicies[0].RequestorSettings.AcceptRequests
-
-    # Expiration settings
-    $Expiration = $AccessPackageAssignmentPolicies[0].DurationInDays
-    $canExtend = $AccessPackageAssignmentPolicies[0].CanExtend
-    $IsApprovalRequiredForExtension = $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.IsApprovalRequiredForExtension
-
-    # Alternate/Escalation approvers
-    $AlternateApprover = $Null
-    $AlternateApproverFallback = $Null
-    $AlternateApproverSecondLevel = $Null
-    $AlternateApproverFallbackSecondLevel = $Null
-    $AlternateApproverThirdLevel = $Null
-    $AlternateApproverFallbackThirdLevel = $Null
-    
-    if ($AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[0].IsEscalationEnabled) {
-        foreach ($Item in $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[0].EscalationApprovers) {
-            $Approver = Get-ApproverDescription -Data $Item
-            if ($Item.IsBackup -eq $true) {
-                $AlternateApproverFallback += "$Approver | "
-            } else {
-                $AlternateApprover += "$Approver | "
-            }
-        }
-    }
-    
-    if ($AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[1].IsEscalationEnabled) {
-        foreach ($Item in $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[1].EscalationApprovers) {
-            $Approver = Get-ApproverDescription -Data $Item
-            if ($Item.IsBackup -eq $true) {
-                $AlternateApproverFallbackSecondLevel += "$Approver | "
-            } else {
-                $AlternateApproverSecondLevel += "$Approver | "
-            }
-        }
-    }
-    
-    if ($AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[2].IsEscalationEnabled) {
-        foreach ($Item in $AccessPackageAssignmentPolicies[0].RequestApprovalSettings.ApprovalStages[2].EscalationApprovers) {
-            $Approver = Get-ApproverDescription -Data $Item
-            if ($Item.IsBackup -eq $true) {
-                $AlternateApproverFallbackThirdLevel += "$Approver | "
-            } else {
-                $AlternateApproverThirdLevel += "$Approver | "
-            }
-        }
-    }
-
-    # Get Custom Extensions and Questions in ONE API call per policy
+    # Get Custom Extensions and Questions (ONCE per Access Package, from ALL policies)
     $AllCustomExtensions = @{}
-    $Questions = @()
+    $QuestionsFromFirstPolicy = @()
     
     foreach ($Policy in $AccessPackageAssignmentPolicies) {
         $PolicyDetails = Get-PolicyExtensionsAndQuestions -PolicyId $Policy.Id
@@ -588,13 +503,13 @@ foreach ($AccessPackage in $AccessPackageList) {
             $AllCustomExtensions[$Stage] += $PolicyDetails.Extensions[$Stage]
         }
         
-        # Get questions from first policy only (same as before)
+        # Get questions from first policy only (questions are typically the same across policies)
         if ($Policy.Id -eq $AccessPackageAssignmentPolicies[0].Id) {
-            $Questions = $PolicyDetails.Questions
+            $QuestionsFromFirstPolicy = $PolicyDetails.Questions
         }
     }
     
-    # Build Custom Extensions string
+    # Build Custom Extensions string (once per AP)
     $CustomExtensionsString = ""
     if ($AllCustomExtensions.Count -gt 0) {
         $ExtParts = @()
@@ -605,7 +520,7 @@ foreach ($AccessPackage in $AccessPackageList) {
         $CustomExtensionsString = $ExtParts -join " | "
     }
     
-    # Add to Custom Extensions report
+    # Add to Custom Extensions report (once per AP)
     foreach ($Stage in $AllCustomExtensions.Keys) {
         foreach ($ExtName in ($AllCustomExtensions[$Stage] | Select-Object -Unique)) {
             $ReportCustomExtensions += [PSCustomObject][Ordered]@{
@@ -617,24 +532,24 @@ foreach ($AccessPackage in $AccessPackageList) {
             }
         }
     }
-
-    # Process Questions
-    $QuestionsCount = $Questions.Count
+    
+    # Process Questions (once per AP, from first policy)
+    $QuestionsCount = $QuestionsFromFirstPolicy.Count
     $QuestionsString = ""
     
-    if ($Questions.Count -gt 0) {
-        $QuestionTexts = $Questions | ForEach-Object { 
+    if ($QuestionsFromFirstPolicy.Count -gt 0) {
+        $QuestionTexts = $QuestionsFromFirstPolicy | ForEach-Object { 
             $reqMark = if ($_.Required) { "*" } else { "" }
             "$($_.QuestionText)$reqMark"
         }
         $QuestionsString = $QuestionTexts -join " | "
         
-        foreach ($Q in $Questions) {
+        foreach ($Q in $QuestionsFromFirstPolicy) {
             $ReportQuestions += [PSCustomObject][Ordered]@{
                 "AP Name" = $AccessPackageName
                 "AP ID" = $AccessPackageID
                 "Catalog" = $Catalog
-                "Policy Name" = $AssignmentPolicyDisplayName
+                "Policy Name" = $AccessPackageAssignmentPolicies[0].DisplayName
                 "Sequence" = $Q.Sequence
                 "Question Text" = $Q.QuestionText
                 "Required" = $Q.Required
@@ -647,40 +562,141 @@ foreach ($AccessPackage in $AccessPackageList) {
         }
     }
 
-    # Build main report object
-    $Obj = [PSCustomObject][Ordered]@{
-        "AP Name" = $AccessPackageName
-        "AP Description" = $Description
-        "AP ID" = $AccessPackageID
-        "Catalog" = $Catalog
-        "Resource Roles" = $GroupsString
-        "Assignment Policy Name" = $AssignmentPolicyDisplayName
-        "Approval Mode" = $ApprovalMode
-        "Allowed Requesters" = $AllowedRequestors
-        "Primary Approvers" = $PrimaryApproversStage1
-        "Fallback Approvers" = $FallbackApproversStage1
-        "Alternate Approvers" = $AlternateApprover
-        "Alternate Approvers Fallback" = $AlternateApproverFallback
-        "2nd Stage Approvers" = $PrimaryApproversStage2
-        "2nd Stage Fallback Approvers" = $FallbackApproversStage2
-        "2nd Stage Alternate Approvers" = $AlternateApproverSecondLevel
-        "2nd Stage Alternate Approvers Fallback" = $AlternateApproverFallbackSecondLevel
-        "3rd Stage Approvers" = $PrimaryApproversStage3
-        "3rd Stage Fallback Approvers" = $FallbackApproversStage3
-        "3rd Stage Alternate Approvers" = $AlternateApproverThirdLevel
-        "3rd Stage Alternate Approvers Fallback" = $AlternateApproverFallbackThirdLevel
-        "Review Recurrence" = $ReviewRecurrence
-        "Reviewers" = $Reviewers
-        "New Requests Enabled" = $EnableNewRequests
-        "Expiration in Days" = $Expiration
-        "Can Extend" = $canExtend
-        "Extension Approval Required" = $IsApprovalRequiredForExtension
-        "Custom Extensions" = $CustomExtensionsString
-        "Questions Count" = $QuestionsCount
-        "Questions" = $QuestionsString
-    }
+    # NOW LOOP THROUGH ALL POLICIES to create separate report rows
+    foreach ($Policy in $AccessPackageAssignmentPolicies) {
+        $TotalPoliciesProcessed++
+        
+        $AssignmentPolicyDisplayName = $Policy.DisplayName
+        $ApprovalMode = $Policy.RequestApprovalSettings.ApprovalMode
+        
+        Write-Log -Message "    Processing policy: $AssignmentPolicyDisplayName" -Level Verbose -Indent 3
+        
+        # Allowed requestors
+        $AllowedRequestors = $Null
+        $Policy.RequestorSettings.AllowedRequestors | ForEach-Object {
+            $Req = $_.AdditionalProperties.description
+            $AllowedRequestors += "$Req |"
+        }
 
-    $Report += $Obj
+        # Get approvers for all stages
+        $PrimaryApproversStage1 = $Null
+        $FallbackApproversStage1 = $Null
+        $PrimaryApproversStage2 = $Null
+        $FallbackApproversStage2 = $Null
+        $PrimaryApproversStage3 = $Null
+        $FallbackApproversStage3 = $Null
+
+        if ($ApprovalMode -ne "NoApproval") {
+            $counter = ($Policy.RequestApprovalSettings.ApprovalStages).Count
+            for ($x = 0; $x -lt $counter; $x++) {
+                $Stage = $x + 1
+                $Policy.RequestApprovalSettings.ApprovalStages[$x].PrimaryApprovers | ForEach-Object {
+                    $Approver = Get-ApproverDescription -Data $_
+                    $IsBackup = $_.IsBackup
+                    switch ($Stage) {
+                        1 { if ($IsBackup) { $FallbackApproversStage1 += "$Approver | " } else { $PrimaryApproversStage1 += "$Approver | " } }
+                        2 { if ($IsBackup) { $FallbackApproversStage2 += "$Approver | " } else { $PrimaryApproversStage2 += "$Approver | " } }
+                        3 { if ($IsBackup) { $FallbackApproversStage3 += "$Approver | " } else { $PrimaryApproversStage3 += "$Approver | " } }
+                    }
+                }
+            }
+        }
+        
+        # Get review settings
+        $ReviewRecurrence = $Policy.AccessReviewSettings.RecurrenceType
+        
+        $Reviewers = $Null
+        if ($Policy.AccessReviewSettings.ReviewerType -eq 'Manager') {
+            $Reviewers = "Manager"
+        } else {
+            $Reviewers = (($Policy.AccessReviewSettings.Reviewers | ForEach-Object { $_.AdditionalProperties.description }) -join " | ")
+        }
+        
+        # Request settings
+        $EnableNewRequests = $Policy.RequestorSettings.AcceptRequests
+
+        # Expiration settings
+        $Expiration = $Policy.DurationInDays
+        $canExtend = $Policy.CanExtend
+        $IsApprovalRequiredForExtension = $Policy.RequestApprovalSettings.IsApprovalRequiredForExtension
+
+        # Alternate/Escalation approvers
+        $AlternateApprover = $Null
+        $AlternateApproverFallback = $Null
+        $AlternateApproverSecondLevel = $Null
+        $AlternateApproverFallbackSecondLevel = $Null
+        $AlternateApproverThirdLevel = $Null
+        $AlternateApproverFallbackThirdLevel = $Null
+        
+        if ($Policy.RequestApprovalSettings.ApprovalStages.Count -ge 1 -and $Policy.RequestApprovalSettings.ApprovalStages[0].IsEscalationEnabled) {
+            foreach ($Item in $Policy.RequestApprovalSettings.ApprovalStages[0].EscalationApprovers) {
+                $Approver = Get-ApproverDescription -Data $Item
+                if ($Item.IsBackup -eq $true) {
+                    $AlternateApproverFallback += "$Approver | "
+                } else {
+                    $AlternateApprover += "$Approver | "
+                }
+            }
+        }
+        
+        if ($Policy.RequestApprovalSettings.ApprovalStages.Count -ge 2 -and $Policy.RequestApprovalSettings.ApprovalStages[1].IsEscalationEnabled) {
+            foreach ($Item in $Policy.RequestApprovalSettings.ApprovalStages[1].EscalationApprovers) {
+                $Approver = Get-ApproverDescription -Data $Item
+                if ($Item.IsBackup -eq $true) {
+                    $AlternateApproverFallbackSecondLevel += "$Approver | "
+                } else {
+                    $AlternateApproverSecondLevel += "$Approver | "
+                }
+            }
+        }
+        
+        if ($Policy.RequestApprovalSettings.ApprovalStages.Count -ge 3 -and $Policy.RequestApprovalSettings.ApprovalStages[2].IsEscalationEnabled) {
+            foreach ($Item in $Policy.RequestApprovalSettings.ApprovalStages[2].EscalationApprovers) {
+                $Approver = Get-ApproverDescription -Data $Item
+                if ($Item.IsBackup -eq $true) {
+                    $AlternateApproverFallbackThirdLevel += "$Approver | "
+                } else {
+                    $AlternateApproverThirdLevel += "$Approver | "
+                }
+            }
+        }
+
+        # Build main report object (ONE ROW PER POLICY)
+        $Obj = [PSCustomObject][Ordered]@{
+            "AP Name" = $AccessPackageName
+            "AP Description" = $Description
+            "AP ID" = $AccessPackageID
+            "Catalog" = $Catalog
+            "Resource Roles" = $GroupsString
+            "Policy ID" = $Policy.Id
+            "Policy Display Name" = $AssignmentPolicyDisplayName
+            "Approval Mode" = $ApprovalMode
+            "Allowed Requesters" = $AllowedRequestors
+            "Primary Approvers" = $PrimaryApproversStage1
+            "Fallback Approvers" = $FallbackApproversStage1
+            "Alternate Approvers" = $AlternateApprover
+            "Alternate Approvers Fallback" = $AlternateApproverFallback
+            "2nd Stage Approvers" = $PrimaryApproversStage2
+            "2nd Stage Fallback Approvers" = $FallbackApproversStage2
+            "2nd Stage Alternate Approvers" = $AlternateApproverSecondLevel
+            "2nd Stage Alternate Approvers Fallback" = $AlternateApproverFallbackSecondLevel
+            "3rd Stage Approvers" = $PrimaryApproversStage3
+            "3rd Stage Fallback Approvers" = $FallbackApproversStage3
+            "3rd Stage Alternate Approvers" = $AlternateApproverThirdLevel
+            "3rd Stage Alternate Approvers Fallback" = $AlternateApproverFallbackThirdLevel
+            "Review Recurrence" = $ReviewRecurrence
+            "Reviewers" = $Reviewers
+            "New Requests Enabled" = $EnableNewRequests
+            "Expiration in Days" = $Expiration
+            "Can Extend" = $canExtend
+            "Extension Approval Required" = $IsApprovalRequiredForExtension
+            "Custom Extensions" = $CustomExtensionsString
+            "Questions Count" = $QuestionsCount
+            "Questions" = $QuestionsString
+        }
+
+        $Report += $Obj
+    }
 }
 
 Write-Progress -Activity "Processing Access Packages" -Completed
@@ -691,6 +707,7 @@ Write-Host "`r".PadRight(135) # Clear the line
 Write-Host ""
 Write-Host "  Processing complete!" -ForegroundColor Green
 Write-Host "  ├─ Access Packages processed: $CountTotal" -ForegroundColor Gray
+Write-Host "  ├─ Total policies processed: $TotalPoliciesProcessed" -ForegroundColor Gray
 Write-Host "  ├─ Total assignments found: $TotalAssignmentsFound" -ForegroundColor Gray
 Write-Host "  └─ Time elapsed: $($TotalElapsedTime.ToString('hh\:mm\:ss'))" -ForegroundColor Gray
 Write-Host ""
@@ -707,50 +724,87 @@ $ReportPrimaryApprovers = @()
 
 foreach ($Item in $Report) {
     $APName = $Item."AP Name"
+    $PolicyName = $Item."Assignment Policy Name"
+    $APWithPolicy = "$APName [$PolicyName]"
     $ResourceRoles = $Item."Resource Roles"
     $PrimApprovers = $Item."Primary Approvers"
     $Requesters = $Item."Allowed Requesters"
     $Reviewers = $Item."Reviewers"
 
-    # Resource Roles
+    # Resource Roles (one entry per policy)
     if ([string]::IsNullOrEmpty($ResourceRoles)) {
-        $ReportResourceRoles += [PSCustomObject]@{ "AP Name" = $APName; "Resource Role" = "" }
+        $ReportResourceRoles += [PSCustomObject]@{ 
+            "AP Name" = $APName
+            "Policy Name" = $PolicyName
+            "Resource Role" = "" 
+        }
     } else {
         foreach ($x in ($ResourceRoles.Split('|') | Where-Object { ![string]::IsNullOrWhiteSpace($_) })) {
             $x = $x.Trim()
-            $ReportResourceRoles += [PSCustomObject]@{ "AP Name" = $APName; "Resource Role" = $x }
+            $ReportResourceRoles += [PSCustomObject]@{ 
+                "AP Name" = $APName
+                "Policy Name" = $PolicyName
+                "Resource Role" = $x 
+            }
+            # For reverse mapping, use AP name only (not policy-specific)
             if ($Hashmap.ContainsKey($x)) {
-                $Hashmap[$x] += "| $APName"
+                if ($Hashmap[$x] -notlike "*$APName*") {
+                    $Hashmap[$x] += "| $APName"
+                }
             } else {
                 $Hashmap.Add($x, "$APName")
             }
         }
     }
 
-    # Primary Approvers
+    # Primary Approvers (one entry per policy)
     if ([string]::IsNullOrEmpty($PrimApprovers)) {
-        $ReportPrimaryApprovers += [PSCustomObject]@{ "AP Name" = $APName; "Primary Approver" = "" }
+        $ReportPrimaryApprovers += [PSCustomObject]@{ 
+            "AP Name" = $APName
+            "Policy Name" = $PolicyName
+            "Primary Approver" = "" 
+        }
     } else {
         foreach ($x in ($PrimApprovers.Split('|') | Where-Object { ![string]::IsNullOrWhiteSpace($_) })) {
-            $ReportPrimaryApprovers += [PSCustomObject]@{ "AP Name" = $APName; "Primary Approver" = $x.Trim() }
+            $ReportPrimaryApprovers += [PSCustomObject]@{ 
+                "AP Name" = $APName
+                "Policy Name" = $PolicyName
+                "Primary Approver" = $x.Trim() 
+            }
         }
     }
 
-    # Allowed Requesters
+    # Allowed Requesters (one entry per policy)
     if ([string]::IsNullOrEmpty($Requesters)) {
-        $AllowedRequesters += [PSCustomObject]@{ "AP Name" = $APName; "Allowed Requesters" = "" }
+        $AllowedRequesters += [PSCustomObject]@{ 
+            "AP Name" = $APName
+            "Policy Name" = $PolicyName
+            "Allowed Requesters" = "" 
+        }
     } else {
         foreach ($x in ($Requesters.Split('|') | Where-Object { ![string]::IsNullOrWhiteSpace($_) })) {
-            $AllowedRequesters += [PSCustomObject]@{ "AP Name" = $APName; "Allowed Requesters" = $x.Trim() }
+            $AllowedRequesters += [PSCustomObject]@{ 
+                "AP Name" = $APName
+                "Policy Name" = $PolicyName
+                "Allowed Requesters" = $x.Trim() 
+            }
         }
     }
 
-    # Reviewers
+    # Reviewers (one entry per policy)
     if ([string]::IsNullOrEmpty($Reviewers)) {
-        $ReportReviewers += [PSCustomObject]@{ "AP Name" = $APName; "Reviewers" = "" }
+        $ReportReviewers += [PSCustomObject]@{ 
+            "AP Name" = $APName
+            "Policy Name" = $PolicyName
+            "Reviewers" = "" 
+        }
     } else {
         foreach ($x in ($Reviewers.Split('|') | Where-Object { ![string]::IsNullOrWhiteSpace($_) })) {
-            $ReportReviewers += [PSCustomObject]@{ "AP Name" = $APName; "Reviewers" = $x.Trim() }
+            $ReportReviewers += [PSCustomObject]@{ 
+                "AP Name" = $APName
+                "Policy Name" = $PolicyName
+                "Reviewers" = $x.Trim() 
+            }
         }
     }
 }
@@ -777,10 +831,10 @@ $DependencyTotal = $Report.Count
 foreach ($R in $Report) {
     $DependencyIndex++
     if ($DependencyIndex % 50 -eq 0) {
-        Write-Progress -Activity "Building Role Dependencies" -Status "Processing package $DependencyIndex of $DependencyTotal" -PercentComplete (($DependencyIndex / $DependencyTotal) * 100)
+        Write-Progress -Activity "Building Role Dependencies" -Status "Processing policy $DependencyIndex of $DependencyTotal" -PercentComplete (($DependencyIndex / $DependencyTotal) * 100)
     }
 
-    # Temporary Hashtable for this package to track unique actors
+    # Temporary Hashtable for this package/policy to track unique actors
     # Key = User/Group Name, Value = Hashtable of their roles in this package
     $PackageActors = @{} 
 
@@ -816,12 +870,13 @@ foreach ($R in $Report) {
     &$ProcessColumn "Reviewers" "Reviewer"
     &$ProcessColumn "Resource Roles" "Resource Role"
 
-    # Convert the found actors into report rows for this package
+    # Convert the found actors into report rows for this package/policy
     foreach ($ActorName in $PackageActors.Keys) {
         $Roles = $PackageActors[$ActorName]
         
         $ReportSummary.Add([PSCustomObject][Ordered]@{
             "Access Package" = $R.'AP Name'
+            "Policy Name" = $R.'Assignment Policy Name'
             "Access Package Description" = $R.'AP Description'
             "User/Group" = $ActorName
             "Allowed Requester" = if ($Roles.ContainsKey("Allowed Requester")) { "X" } else { "" }
@@ -847,14 +902,17 @@ Write-Progress -Activity "Building Role Dependencies" -Completed
 Write-Host "  Role Dependencies: $($ReportSummary.Count) entries created" -ForegroundColor Gray
 
 # Summary Statistics
+$UniqueAccessPackages = ($Report | Select-Object -Property "AP Name" -Unique).Count
 $SummaryStats = @(
-    [PSCustomObject]@{ Metric = "Total Access Packages"; Value = $Report.Count }
+    [PSCustomObject]@{ Metric = "Total Access Packages"; Value = $UniqueAccessPackages }
+    [PSCustomObject]@{ Metric = "Total Assignment Policies"; Value = $Report.Count }
     [PSCustomObject]@{ Metric = "Total Catalogs"; Value = ($Report | Select-Object -ExpandProperty Catalog -Unique).Count }
-    [PSCustomObject]@{ Metric = "Access Packages with Approval Required"; Value = ($Report | Where-Object { $_."Approval Mode" -ne "NoApproval" }).Count }
-    [PSCustomObject]@{ Metric = "Access Packages with No Approval"; Value = ($Report | Where-Object { $_."Approval Mode" -eq "NoApproval" }).Count }
-    [PSCustomObject]@{ Metric = "Access Packages with Access Reviews"; Value = ($Report | Where-Object { $_."Review Recurrence" -ne $null -and $_."Review Recurrence" -ne "" }).Count }
-    [PSCustomObject]@{ Metric = "Access Packages with Custom Extensions"; Value = ($Report | Where-Object { $_."Custom Extensions" -ne "" }).Count }
-    [PSCustomObject]@{ Metric = "Access Packages with Requestor Questions"; Value = ($Report | Where-Object { $_."Questions Count" -gt 0 }).Count }
+    [PSCustomObject]@{ Metric = "Access Packages with Multiple Policies"; Value = ($Report | Group-Object "AP Name" | Where-Object { $_.Count -gt 1 }).Count }
+    [PSCustomObject]@{ Metric = "Policies with Approval Required"; Value = ($Report | Where-Object { $_."Approval Mode" -ne "NoApproval" }).Count }
+    [PSCustomObject]@{ Metric = "Policies with No Approval"; Value = ($Report | Where-Object { $_."Approval Mode" -eq "NoApproval" }).Count }
+    [PSCustomObject]@{ Metric = "Policies with Access Reviews"; Value = ($Report | Where-Object { $_."Review Recurrence" -ne $null -and $_."Review Recurrence" -ne "" }).Count }
+    [PSCustomObject]@{ Metric = "Access Packages with Custom Extensions"; Value = ($ReportCustomExtensions | Select-Object "AP Name" -Unique).Count }
+    [PSCustomObject]@{ Metric = "Access Packages with Requestor Questions"; Value = ($ReportQuestions | Select-Object "AP Name" -Unique).Count }
     [PSCustomObject]@{ Metric = "Total Custom Extension Configurations"; Value = $ReportCustomExtensions.Count }
     [PSCustomObject]@{ Metric = "Total Requestor Questions"; Value = $ReportQuestions.Count }
     [PSCustomObject]@{ Metric = "Total Assignments"; Value = ($ReportAssignments | Where-Object { $_."Assignment" -ne "" }).Count }
@@ -904,7 +962,9 @@ Write-Host "File created:" -ForegroundColor White
 Write-Host "  $ReportPath" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Summary:" -ForegroundColor White
-Write-Host "  - Total Access Packages: $($Report.Count)" -ForegroundColor Cyan
+Write-Host "  - Unique Access Packages: $UniqueAccessPackages" -ForegroundColor Cyan
+Write-Host "  - Total Assignment Policies: $($Report.Count)" -ForegroundColor Cyan
+Write-Host "  - Access Packages with Multiple Policies: $(($Report | Group-Object 'AP Name' | Where-Object { $_.Count -gt 1 }).Count)" -ForegroundColor Cyan
 Write-Host "  - Total Catalogs: $(($Report | Select-Object -ExpandProperty Catalog -Unique).Count)" -ForegroundColor Cyan
 Write-Host "  - Total Assignments: $(($ReportAssignments | Where-Object { $_.'Assignment' -ne '' }).Count)" -ForegroundColor Cyan
 Write-Host "  - Role Dependencies entries: $($ReportSummary.Count)" -ForegroundColor Cyan
