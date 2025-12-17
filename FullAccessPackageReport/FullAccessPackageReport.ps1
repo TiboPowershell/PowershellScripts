@@ -53,7 +53,7 @@
     - The App Registration must have the following Microsoft Graph API permissions (Application):
         * EntitlementManagement.Read.All
         * Group.Read.All
-        * Directory.Read.All
+        
     
     Required PowerShell Modules:
         * Microsoft.Graph.Authentication
