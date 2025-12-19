@@ -272,7 +272,7 @@ function Get-ResourceRolesForEmptyPackages {
             try {
                 $AccessPackageCatalogAccessPackageResourceList = Get-MgBetaEntitlementManagementAccessPackageCatalogAccessPackageResource `
                     -AccessPackageCatalogId $AccessPackageCatalogObj.Id `
-                    -ExpandProperty "AccessPackageResourceRoles,AccessPackageResourceScopes,AccessPackageResourceEnvironment"
+                    -ExpandProperty "AccessPackageResourceRoles,AccessPackageResourceScopes,AccessPackageResourceEnvironment" -all
             }
             catch {
                 Write-Log -Message "Failed to get resources for catalog '$($AccessPackageCatalogObj.DisplayName)': $($_.Exception.Message)" -Level Warning -Indent 2
